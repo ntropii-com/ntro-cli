@@ -1,8 +1,29 @@
 [project]
 name = "ntro-cli"
 version = "0.1.0"
-description = "CLI for the ntro platform"
+description = "Command-line interface for the ntro platform — fund operations automation for private markets"
+readme = "README.md"
 requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [
+    { name = "Ntropii", email = "dev@ntropii.com" },
+]
+keywords = ["ntro", "fund administration", "private markets", "CLI", "workflow automation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business :: Financial",
+    "Topic :: Terminals",
+    "Environment :: Console",
+    "Typing :: Typed",
+]
 dependencies = [
     "ntro>=0.1.0",
     "typer>=0.12",
@@ -11,6 +32,13 @@ dependencies = [
 
 [project.scripts]
 ntro = "ntro_cli.main:app"
+
+[project.urls]
+Homepage = "https://ntropii.com"
+Documentation = "https://github.com/ntropii-com/ntro-cli#readme"
+Repository = "https://github.com/ntropii-com/ntro-cli"
+"Bug Tracker" = "https://github.com/ntropii-com/ntro-cli/issues"
+Changelog = "https://github.com/ntropii-com/ntro-cli/releases"
 
 [project.optional-dependencies]
 dev = [
