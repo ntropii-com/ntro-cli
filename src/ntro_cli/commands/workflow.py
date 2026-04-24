@@ -203,3 +203,139 @@ def _poll_task(client, task_id: str, interval: int = 3, timeout: int = 300) -> N
         out.output(task, title=f"Final status: {task.status}")
     except NtroError as e:
         out.print_error(str(e))
+
+
+# ── ntro workflow test (local inner-loop harness) ─────────────────────
+
+
+@app.command("test")
+def test_runbook(
+    runbook: Path = typer.Argument(
+        ...,
+        help="Path to runbook directory (containing templates/workflow.py)",
+    ),
+    children: list[Path] = typer.Option(
+        [],
+        "--child",
+        help="Path to a child runbook directory (repeatable)",
+    ),
+    scenario: list[str] = typer.Option(
+        [],
+        "--scenario",
+        "-s",
+        help="Scenario name to run (repeatable). Default: all built-ins (happy, reject_all)",
+    ),
+    timeout: float = typer.Option(
+        30.0, "--timeout", help="Per-scenario timeout in seconds"
+    ),
+    json_out: bool = typer.Option(
+        False, "--json", help="Emit machine-readable JSON instead of human report"
+    ),
+    workflow_class: Optional[str] = typer.Option(
+        None,
+        "--workflow-class",
+        help="Workflow class name (default: derived from runbook dir name)",
+    ),
+    input_json: Optional[str] = typer.Option(
+        None,
+        "--input",
+        help="JSON for the workflow input (inline or @file). Defaults to an "
+             "auto-mocked context inferred from the workflow's run() type.",
+    ),
+) -> None:
+    """Run a runbook against the in-memory test harness.
+
+    No deploy, no docker, no real Temporal — boots an embedded test
+    server, registers the workflow + child workflows with auto-mocked
+    activities, drives the agent loop per scenario, and prints a
+    pass/fail report.
+
+    Example::
+
+        ntro workflow test ./runbooks/document-ingest
+        ntro workflow test ./runbooks/nav-monthly \\
+            --child ./runbooks/document-ingest \\
+            --child ./runbooks/nav-monthly-journals \\
+            --scenario happy
+    """
+    import asyncio
+    import importlib
+
+    try:
+        from ntro.testing import (
+            BUILT_IN_SCENARIOS,
+            WorkflowHarness,
+            load_runbook,
+            report,
+        )
+    except ImportError as exc:
+        out.print_error(
+            "ntro.testing not available — install with `pip install 'ntro[testing]'`. "
+            f"({exc})"
+        )
+        raise typer.Exit(1)
+
+    if not runbook.is_dir():
+        out.print_error(f"Runbook directory not found: {runbook}")
+        raise typer.Exit(1)
+
+    # Resolve scenarios.
+    if not scenario:
+        scenarios = list(BUILT_IN_SCENARIOS.values())
+    else:
+        try:
+            scenarios = [BUILT_IN_SCENARIOS[name] for name in scenario]
+        except KeyError as exc:
+            available = ", ".join(BUILT_IN_SCENARIOS)
+            out.print_error(f"Unknown scenario {exc}. Available: {available}")
+            raise typer.Exit(1)
+
+    # Load parent + children.
+    workflow_cls, _ = load_runbook(runbook, workflow_class=workflow_class)
+    child_classes: list[type] = []
+    for cd in children:
+        c_cls, _ = load_runbook(cd)
+        child_classes.append(c_cls)
+
+    # Build the workflow input. If --input wasn't passed, generate an
+    # auto-mocked context from the run() method's first arg type.
+    if input_json:
+        wf_input = load_json_input(input_json)
+        # If it's a dict and the run() expects a Pydantic model, coerce.
+        try:
+            run_sig = importlib.import_module(workflow_cls.__module__)
+            import inspect
+            params = list(inspect.signature(workflow_cls.run).parameters.values())
+            if len(params) >= 2:
+                input_type = params[1].annotation
+                if hasattr(input_type, "model_validate"):
+                    wf_input = input_type.model_validate(wf_input)
+        except Exception:
+            pass
+    else:
+        from ntro.testing.auto_mock import generate_fake
+        import inspect
+        params = list(inspect.signature(workflow_cls.run).parameters.values())
+        if len(params) < 2:
+            out.print_error(f"Cannot infer input — {workflow_cls.__name__}.run takes no payload")
+            raise typer.Exit(1)
+        wf_input = generate_fake(params[1].annotation)
+
+    async def _run_all() -> list:
+        results = []
+        for sc in scenarios:
+            async with WorkflowHarness(workflow_cls, child_workflows=child_classes) as h:
+                r = await h.run(input=wf_input, scenario=sc, timeout_s=timeout)
+                results.append(r)
+        return results
+
+    results = asyncio.run(_run_all())
+
+    if json_out:
+        print(report.json(results))
+    else:
+        print(report.human(results))
+
+    failed = [r for r in results if r.status != "completed"]
+    if failed:
+        raise typer.Exit(1)

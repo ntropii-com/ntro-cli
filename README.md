@@ -219,6 +219,38 @@ ntro workflow run nav-monthly --tenant acme-fund-admin --wait   # Poll until com
 ntro workflow run nav-monthly --tenant acme-fund-admin --dry-run
 ```
 
+#### `ntro workflow test` — local inner-loop tests
+
+Run a runbook against an in-memory Temporal with auto-mocked activities. No deploy, no docker — sub-second startup. Catches the same workflow bugs the deployed e2e flow would, but in seconds rather than minutes.
+
+```bash
+# Single workflow (no children)
+ntro workflow test ./runbooks/document-ingest
+
+# Parent + children (each --child registered alongside the parent)
+ntro workflow test ./runbooks/nav-monthly \
+  --child ./runbooks/document-ingest \
+  --child ./runbooks/nav-monthly-journals
+
+# Specific scenarios + machine-readable output for CI
+ntro workflow test ./runbooks/nav-monthly --scenario happy --json
+```
+
+Output:
+```
+✓  happy        (0.86s)
+    [ 0.13s] submit_file  hly-7a820232  signal=tb_submitted, source=xero-trial-balance
+    [ 0.36s] review       ument-ingest  response=approved
+    [ 0.47s] review       hly-journals  response=approved
+    [ 0.86s] done         hly-7a820232
+✓  reject_all   (0.45s)
+summary: 2 passed, 0 failed (of 2)
+```
+
+What's auto-mocked: activity returns (from Pydantic types), HITL approvals (per scenario), submit_file signals (with fake `document_ref`/slugs derived from the workflow's advertised args). See [`ntro` SDK README — Testing workflows](../ntro-python/README.md#testing-workflows-ntrotesting) for the full surface and how to define custom scenarios.
+
+Requires `ntro[testing]` (installed automatically as a CLI dependency).
+
 ---
 
 ### `ntro run`
