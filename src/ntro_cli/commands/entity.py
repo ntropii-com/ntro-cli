@@ -11,10 +11,18 @@ import typer
 from ntro.workspace.config import load_config
 from ntro.workspace.exceptions import NtroError
 from ntro_cli import output as out
+from ntro_cli.commands._ai_helpers import (
+    build_ai_section,
+    merge_ai_into_config,
+    parse_existing_config,
+    render_ai_section,
+)
 from ntro_cli.context import get_client
 from ntro_cli.helpers import load_json_input
 
 app = typer.Typer(help="Manage entities (SPVs/funds within a tenant)")
+ai_app = typer.Typer(help="Configure entity-level AI provider override")
+app.add_typer(ai_app, name="ai")
 
 
 def _resolve_tenant(tenant_flag: Optional[str]) -> str:
@@ -87,6 +95,113 @@ def list_entities(
             entities,
             columns=["id", "slug", "name", "tenantId", "type", "currency"],
             title="Entities",
+        )
+    except NtroError as e:
+        out.print_error(str(e))
+        raise typer.Exit(1)
+
+
+# ── ntro entity ai ──────────────────────────────────────────────────
+#
+# Entity-level AI provider override. Inherits from tenant.config.ai
+# unless explicitly set here.
+
+
+def _find_entity(client, tenant_id: str, entity_id: str):
+    """List entities for the tenant and pick the one matching id-or-slug.
+    Avoids needing a dedicated GET /entities/:id endpoint for the PoC."""
+    entities = client.entities.list_sync(tenant_id=tenant_id)
+    for ent in entities:
+        if ent.id == entity_id or ent.slug == entity_id:
+            return ent
+    raise typer.BadParameter(
+        f"Entity '{entity_id}' not found in tenant '{tenant_id}'."
+    )
+
+
+@ai_app.command("show")
+def ai_show(
+    entity_id: str = typer.Argument(help="Entity slug or ID"),
+    tenant: Optional[str] = typer.Option(
+        None, "--tenant", help="Tenant slug or ID", envvar="NTRO_TENANT"
+    ),
+) -> None:
+    """Show this entity's AI override (or note that it inherits from the tenant)."""
+    try:
+        tenant_id = _resolve_tenant(tenant)
+        client = get_client()
+        entity = _find_entity(client, tenant_id, entity_id)
+        cfg = parse_existing_config(getattr(entity, "config", None))
+        render_ai_section(cfg, title=f"Entity {entity.slug} — AI configuration")
+    except NtroError as e:
+        out.print_error(str(e))
+        raise typer.Exit(1)
+
+
+@ai_app.command("set")
+def ai_set(
+    entity_id: str = typer.Argument(help="Entity slug or ID"),
+    tenant: Optional[str] = typer.Option(
+        None, "--tenant", help="Tenant slug or ID", envvar="NTRO_TENANT"
+    ),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        help="One of: NTROPII, ANTHROPIC, AZURE_OPENAI, BEDROCK, DATABRICKS_FM",
+    ),
+    extraction_model: Optional[str] = typer.Option(
+        None, "--extraction-model", help="Model for ai.extract() calls"
+    ),
+    judgement_model: Optional[str] = typer.Option(
+        None, "--judgement-model", help="Model for run_quality_check() calls"
+    ),
+    default_model: Optional[str] = typer.Option(
+        None, "--default-model", help="Fallback model when capability slot is unset"
+    ),
+) -> None:
+    """Set the entity's AI provider override (replaces the .ai sub-section)."""
+    if not any([provider, extraction_model, judgement_model, default_model]):
+        raise typer.BadParameter(
+            "Provide at least one of: --provider, --extraction-model, "
+            "--judgement-model, --default-model"
+        )
+    try:
+        tenant_id = _resolve_tenant(tenant)
+        client = get_client()
+        entity = _find_entity(client, tenant_id, entity_id)
+        existing = parse_existing_config(getattr(entity, "config", None))
+        ai_section = build_ai_section(
+            provider=provider,
+            extraction_model=extraction_model,
+            judgement_model=judgement_model,
+            default_model=default_model,
+        )
+        merged = merge_ai_into_config(existing, ai_section)
+        updated = client.entities.update_sync(tenant_id, entity_id, config=merged)
+        cfg = parse_existing_config(getattr(updated, "config", None))
+        render_ai_section(cfg, title=f"Entity {updated.slug} — AI configuration")
+    except NtroError as e:
+        out.print_error(str(e))
+        raise typer.Exit(1)
+
+
+@ai_app.command("reset")
+def ai_reset(
+    entity_id: str = typer.Argument(help="Entity slug or ID"),
+    tenant: Optional[str] = typer.Option(
+        None, "--tenant", help="Tenant slug or ID", envvar="NTRO_TENANT"
+    ),
+) -> None:
+    """Clear the entity's AI override; inherits from tenant.config.ai."""
+    try:
+        tenant_id = _resolve_tenant(tenant)
+        client = get_client()
+        entity = _find_entity(client, tenant_id, entity_id)
+        existing = parse_existing_config(getattr(entity, "config", None))
+        merged = merge_ai_into_config(existing, {})
+        updated = client.entities.update_sync(tenant_id, entity_id, config=merged)
+        out.print_success(
+            f"Entity {updated.slug}: AI override cleared. Inherits from tenant."
         )
     except NtroError as e:
         out.print_error(str(e))

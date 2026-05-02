@@ -8,10 +8,18 @@ import typer
 
 from ntro.workspace.exceptions import NtroError
 from ntro_cli import output as out
+from ntro_cli.commands._ai_helpers import (
+    build_ai_section,
+    merge_ai_into_config,
+    parse_existing_config,
+    render_ai_section,
+)
 from ntro_cli.context import get_client
 from ntro_cli.helpers import load_json_input
 
 app = typer.Typer(help="Manage tenants (client cells)")
+ai_app = typer.Typer(help="Configure tenant AI provider (model + provider)")
+app.add_typer(ai_app, name="ai")
 
 
 VALID_DATA_PLATFORMS = ("managed-postgres", "snowflake", "microsoft-fabric")
@@ -117,6 +125,88 @@ def info(id: str = typer.Argument(help="Tenant slug or ID")) -> None:
         client = get_client()
         tenant = client.tenants.get_sync(id)
         out.output(tenant, title=f"Tenant: {tenant.slug}")
+    except NtroError as e:
+        out.print_error(str(e))
+        raise typer.Exit(1)
+
+
+# ── ntro tenant ai ──────────────────────────────────────────────────
+#
+# Convenience over `tenant config set/get` for the most common config
+# section. Persists under `tenants.config.ai` server-side; resolved at
+# task dispatch with optional override on `entities.config.ai`.
+
+
+@ai_app.command("show")
+def ai_show(id: str = typer.Argument(help="Tenant slug or ID")) -> None:
+    """Show the tenant's current AI provider configuration."""
+    try:
+        client = get_client()
+        tenant = client.tenants.get_sync(id)
+        cfg = parse_existing_config(getattr(tenant, "config", None))
+        render_ai_section(cfg, title=f"Tenant {tenant.slug} — AI configuration")
+    except NtroError as e:
+        out.print_error(str(e))
+        raise typer.Exit(1)
+
+
+@ai_app.command("set")
+def ai_set(
+    id: str = typer.Argument(help="Tenant slug or ID"),
+    provider: Optional[str] = typer.Option(
+        None,
+        "--provider",
+        help="One of: NTROPII, ANTHROPIC, AZURE_OPENAI, BEDROCK, DATABRICKS_FM",
+    ),
+    extraction_model: Optional[str] = typer.Option(
+        None, "--extraction-model", help="Model for ai.extract() calls"
+    ),
+    judgement_model: Optional[str] = typer.Option(
+        None, "--judgement-model", help="Model for run_quality_check() calls"
+    ),
+    default_model: Optional[str] = typer.Option(
+        None, "--default-model", help="Fallback model when capability slot is unset"
+    ),
+) -> None:
+    """Set the tenant's AI provider configuration (replaces the .ai
+    sub-section; other config keys untouched)."""
+    if not any([provider, extraction_model, judgement_model, default_model]):
+        raise typer.BadParameter(
+            "Provide at least one of: --provider, --extraction-model, "
+            "--judgement-model, --default-model"
+        )
+    try:
+        client = get_client()
+        tenant = client.tenants.get_sync(id)
+        existing = parse_existing_config(getattr(tenant, "config", None))
+        ai_section = build_ai_section(
+            provider=provider,
+            extraction_model=extraction_model,
+            judgement_model=judgement_model,
+            default_model=default_model,
+        )
+        merged = merge_ai_into_config(existing, ai_section)
+        updated = client.tenants.update_sync(id, config=merged)
+        cfg = parse_existing_config(getattr(updated, "config", None))
+        render_ai_section(cfg, title=f"Tenant {updated.slug} — AI configuration")
+    except NtroError as e:
+        out.print_error(str(e))
+        raise typer.Exit(1)
+
+
+@ai_app.command("reset")
+def ai_reset(id: str = typer.Argument(help="Tenant slug or ID")) -> None:
+    """Clear the tenant's AI override; falls back to workspace default."""
+    try:
+        client = get_client()
+        tenant = client.tenants.get_sync(id)
+        existing = parse_existing_config(getattr(tenant, "config", None))
+        merged = merge_ai_into_config(existing, {})
+        updated = client.tenants.update_sync(id, config=merged)
+        out.print_success(
+            f"Tenant {updated.slug}: AI override cleared. "
+            f"Falls back to workspace default (Anthropic Haiku)."
+        )
     except NtroError as e:
         out.print_error(str(e))
         raise typer.Exit(1)
