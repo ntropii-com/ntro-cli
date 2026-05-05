@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -102,10 +103,62 @@ def deploy(
     version_id: Optional[str] = typer.Option(None, "--version", help="Workflow version ID"),
     tenant: Optional[str] = typer.Option(None, "--tenant", help="Tenant ID"),
     entity: Optional[str] = typer.Option(None, "--entity", help="Entity ID"),
+    runbook: Optional[str] = typer.Option(
+        None,
+        "--runbook",
+        help="Runbook slug for hot deploy mode (uses runbook deploy endpoint)",
+    ),
+    runbook_dir: Optional[Path] = typer.Option(
+        None,
+        "--runbook-dir",
+        exists=True,
+        file_okay=False,
+        dir_okay=True,
+        help="Runbook directory containing templates/ for hot deploy mode",
+    ),
+    workflow_class: Optional[str] = typer.Option(
+        None,
+        "--workflow-class",
+        help="Workflow class override for hot deploy mode",
+    ),
     json_input: Optional[str] = typer.Option(None, "--json", help="JSON payload (inline or @file)"),
 ) -> None:
-    """Deploy a workflow version to a tenant/entity."""
+    """Deploy a workflow version, or hot deploy a runbook bundle."""
     try:
+        # Hot deploy mode: ntro workflow deploy --runbook ... --runbook-dir ...
+        if runbook or runbook_dir:
+            if not runbook:
+                raise typer.BadParameter("Provide --runbook when using --runbook-dir")
+            if not tenant:
+                raise typer.BadParameter("Provide --tenant for runbook hot deploy")
+            if not runbook_dir:
+                raise typer.BadParameter("Provide --runbook-dir for runbook hot deploy")
+
+            templates_dir = runbook_dir / "templates"
+            if not templates_dir.is_dir():
+                raise typer.BadParameter(f"Missing templates/ at {templates_dir}")
+
+            deploy_version = version_id or _read_version_from_runbook_md(runbook_dir / "runbook.md")
+            deploy_class = workflow_class or _camel_case_workflow(runbook)
+            files = _gather_runbook_files(runbook_dir)
+            if not files:
+                raise typer.BadParameter(
+                    "No deployable files found in templates/, subledgers/, or migrations/"
+                )
+
+            client = get_client()
+            result = client.runbooks.deploy_sync(
+                runbook,
+                tenant_slug=tenant,
+                version=deploy_version,
+                workflow_class=deploy_class,
+                activity_modules=["activities"],
+                files=files,
+            )
+            out.output(result, title=f"Runbook deployed: {runbook}@{deploy_version}")
+            return
+
+        # Existing workflow deployment mode.
         if json_input:
             payload = load_json_input(json_input)
         else:
@@ -203,6 +256,30 @@ def _poll_task(client, task_id: str, interval: int = 3, timeout: int = 300) -> N
         out.output(task, title=f"Final status: {task.status}")
     except NtroError as e:
         out.print_error(str(e))
+
+
+def _camel_case_workflow(slug: str) -> str:
+    return "".join(part.capitalize() for part in slug.split("-")) + "Workflow"
+
+
+def _read_version_from_runbook_md(runbook_md: Path) -> str:
+    text = runbook_md.read_text(encoding="utf-8") if runbook_md.exists() else ""
+    match = re.search(r"^version:\s*(\S+)", text, flags=re.MULTILINE)
+    return match.group(1) if match else "0.1.0"
+
+
+def _gather_runbook_files(runbook_dir: Path) -> dict[str, str]:
+    files: dict[str, str] = {}
+    for sub in ("templates", "subledgers", "migrations"):
+        sub_dir = runbook_dir / sub
+        if not sub_dir.is_dir():
+            continue
+        for path in sub_dir.rglob("*"):
+            if not path.is_file() or "__pycache__" in path.parts:
+                continue
+            rel = path.relative_to(runbook_dir)
+            files[str(rel)] = path.read_text(encoding="utf-8")
+    return files
 
 
 # ── ntro workflow test (local inner-loop harness) ─────────────────────
