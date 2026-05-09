@@ -1,8 +1,8 @@
-"""ntro workflow — push, run, list, info, test.
+"""ntro workflow — create, run, list, info, test.
 
 Phase 1.3 of N-74 reshaped this surface around a single primary verb:
 
-    ntro workflow push --path <fs-or-uri> [--tenant T] [--entity E] [--schedule S]
+    ntro workflow create --path <fs-or-uri> [--tenant T] [--entity E] [--schedule S]
 
 Behaviour:
   - Resolves ``--path`` to an agent (auto-create-or-version) via the URI
@@ -17,8 +17,8 @@ Behaviour:
     to ntro-worker via NtroOpsDeployWorkflow).
 
 Old commands removed (clean break, no deprecation aliases):
-  ``ntro workflow create``, ``ntro workflow deploy``,
-  ``ntro workflow deploy-status``, ``ntro workflow push <id> <artifact>``.
+  ``ntro workflow deploy``, ``ntro workflow deploy-status``,
+  ``ntro workflow push <id> <artifact>``.
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from ntro_cli import output as out
 from ntro_cli.context import get_client
 from ntro_cli.helpers import load_json_input
 
-app = typer.Typer(help="Push agents/workflows, run tasks, inspect history")
+app = typer.Typer(help="Create agents/workflows, run tasks, inspect history")
 
 
 # ── URI dispatch ──────────────────────────────────────────────────────
@@ -122,11 +122,11 @@ def _resolve_path(path: str, client) -> dict:
     )
 
 
-# ── ntro workflow push ────────────────────────────────────────────────
+# ── ntro workflow create ──────────────────────────────────────────────
 
 
 @app.command()
-def push(
+def create(
     path: str = typer.Option(
         ...,
         "--path",
@@ -180,20 +180,20 @@ def push(
         ),
     ),
 ) -> None:
-    """Push an agent (auto-create-or-version), and optionally bind a workflow.
+    """Create or update an agent, and optionally bind a workflow to an entity.
 
     Common flow:
 
         # Register agent + create workflow + deploy code in one shot
-        ntro workflow push --path ./runbooks/nav-monthly/ \\
+        ntro workflow create --path ./runbooks/nav-monthly/ \\
             --tenant byng --entity 4-high-court-limited \\
             --schedule "0 8 5 * *"
 
-        # Re-push runbook code only (no scheduling args = no workflow)
-        ntro workflow push --path ./runbooks/nav-monthly/ --tenant byng
+        # Update runbook code only (no scheduling args = no workflow)
+        ntro workflow create --path ./runbooks/nav-monthly/ --tenant byng
 
         # Bind same agent to a second entity
-        ntro workflow push --path ./runbooks/nav-monthly/ \\
+        ntro workflow create --path ./runbooks/nav-monthly/ \\
             --tenant byng --entity another-entity-slug
     """
     if schedule and not entity:
@@ -220,7 +220,7 @@ def push(
         agent_version = None
         runbook_deploy = resolved.get("_runbook_deploy")
         if agent.kind == "runbook":
-            agent_version = client.agents.push_version_sync(agent.id)
+            agent_version = client.agents.create_version_sync(agent.id)
             out.print_kv("Agent version", f"v{agent_version.version} ({agent_version.id})")
 
             # 4. Trigger worker deploy — uploads templates to ntro-worker via

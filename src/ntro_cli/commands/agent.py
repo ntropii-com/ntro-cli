@@ -1,8 +1,7 @@
 """ntro agent — power-user agent management.
 
-Most users won't need this — `ntro workflow push --path` upserts the agent
-implicitly. These subcommands are for inspection, deletion, and forcing a
-capability-manifest refresh on external-kind agents (Phase 2+).
+Most users won't need this — `ntro workflow create --path` upserts the agent
+implicitly. These subcommands are for inspection and deletion.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ from ntro.workspace.exceptions import NtroError
 from ntro_cli import output as out
 from ntro_cli.context import get_client
 
-app = typer.Typer(help="Inspect, refresh, or delete agents (power user)")
+app = typer.Typer(help="Inspect or delete agents (power user)")
 
 
 @app.command("list")
@@ -75,22 +74,6 @@ def delete(
                 raise typer.Exit(0)
         client.agents.delete_sync(id)
         out.print_success(f"Agent {id} deleted.")
-    except NtroError as e:
-        out.print_error(str(e))
-        raise typer.Exit(1)
-
-
-@app.command()
-def refresh(id: str = typer.Argument(help="Agent ID")) -> None:
-    """Force refresh of capability_manifest from the ecosystem.
-
-    No-op for kind=runbook in Phase 1; throws Phase-2 marker for external
-    kinds. Endpoint shape stable from day one.
-    """
-    try:
-        client = get_client()
-        agent = client.agents.refresh_sync(id)
-        out.output(agent, title=f"Agent refreshed: {agent.name}")
     except NtroError as e:
         out.print_error(str(e))
         raise typer.Exit(1)
