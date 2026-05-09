@@ -8,7 +8,7 @@ from typing import Optional
 import typer
 
 from ntro_cli import output as out
-from ntro_cli.commands import auth, entity, integration, run, tenant, workflow
+from ntro_cli.commands import agent, auth, entity, integration, run, tenant, workflow
 
 app = typer.Typer(
     name="ntro",
@@ -21,6 +21,7 @@ app.add_typer(auth.app, name="auth")
 app.add_typer(integration.app, name="integration")
 app.add_typer(tenant.app, name="tenant")
 app.add_typer(entity.app, name="entity")
+app.add_typer(agent.app, name="agent")
 app.add_typer(workflow.app, name="workflow")
 app.add_typer(run.app, name="run")
 
