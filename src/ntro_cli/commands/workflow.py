@@ -1,24 +1,13 @@
 """ntro workflow — create, run, list, info, test.
 
-Phase 1.3 of N-74 reshaped this surface around a single primary verb:
+N-80 reshaped this surface: workflows are anchored to runbooks, not
+agents. ``ntro workflow create --path ./runbooks/<slug>/`` deploys the
+runbook to the worker AND creates a workflow row pointing at the slug.
+No agent rows are created.
 
-    ntro workflow create --path <fs-or-uri> [--tenant T] [--entity E] [--schedule S]
-
-Behaviour:
-  - Resolves ``--path`` to an agent (auto-create-or-version) via the URI
-    dispatch registry below. Phase 1 registers only the filesystem
-    handler; future schemes (anthropic://, openai://, vertex://, azure:/)
-    drop in additively.
-  - If ``--tenant --entity`` provided, also creates a workflow row
-    binding the agent to that entity (with optional --schedule / --timezone).
-  - If ``--tenant`` is provided alone, only the agent is created/updated;
-    no workflow.
-  - For runbook paths, also triggers the worker deploy (uploads templates
-    to ntro-worker via NtroOpsDeployWorkflow).
-
-Old commands removed (clean break, no deprecation aliases):
-  ``ntro workflow deploy``, ``ntro workflow deploy-status``,
-  ``ntro workflow push <id> <artifact>``.
+External agents (Phase 2 / N-76) are registered separately via
+``ntro agent create --path anthropic://agents/<id>`` and invoked from
+inside runbook code via ``ntro.workflow.agents.invoke``.
 """
 
 from __future__ import annotations
@@ -40,86 +29,49 @@ from ntro_cli.helpers import load_json_input
 app = typer.Typer(help="Create agents/workflows, run tasks, inspect history")
 
 
-# ── URI dispatch ──────────────────────────────────────────────────────
+# ── Path resolution ──────────────────────────────────────────────────
 
 
-class _PathHandler(Protocol):
-    """Resolves ``--path`` to (kind, **agent_kwargs).
+def _resolve_runbook_path(path: str) -> dict:
+    """Resolve a filesystem path to runbook deployment metadata."""
+    parsed = urlparse(path)
+    if parsed.scheme not in ("", "file"):
+        raise typer.BadParameter(
+            f"Path '{path}' is a {parsed.scheme}:// URI. ntro workflow create takes "
+            f"a filesystem runbook path. To register an external agent, use "
+            f"`ntro agent create --path <uri>` (Phase 2, N-76)."
+        )
+    directory = Path(path).expanduser().resolve()
+    if not directory.is_dir():
+        raise typer.BadParameter(f"Path '{path}' is not a directory.")
+    runbook_md = directory / "runbook.md"
+    if not runbook_md.exists():
+        raise typer.BadParameter(
+            f"Path '{directory}' is missing runbook.md. A runbook directory "
+            f"must contain runbook.md and a templates/ subdir."
+        )
+    templates_dir = directory / "templates"
+    if not templates_dir.is_dir():
+        raise typer.BadParameter(
+            f"Path '{directory}' is missing templates/. Cannot deploy."
+        )
 
-    Each handler receives the raw path string and either returns the
-    agent kwargs to feed ``client.agents.create`` plus extra info the
-    push flow needs (e.g. runbook bundle files), or raises
-    ``typer.BadParameter`` if the path doesn't match its scheme.
-    """
+    slug = _read_slug_from_runbook_md(runbook_md, fallback=directory.name)
+    version = _read_version_from_runbook_md(runbook_md, fallback="0.1.0")
+    workflow_class = _camel_case_workflow(slug)
+    files = _gather_runbook_files(directory)
+    if not files:
+        raise typer.BadParameter(
+            f"No deployable files in templates/, subledgers/, or migrations/ "
+            f"under {directory}."
+        )
 
-    def matches(self, path: str) -> bool: ...
-    def resolve(self, path: str, client) -> dict: ...
-
-
-class _RunbookFilesystemHandler:
-    """``./runbooks/foo/`` → kind=runbook agent + bundle files for worker deploy."""
-
-    def matches(self, path: str) -> bool:
-        # Filesystem if no URI scheme. urlparse turns "./foo/" into
-        # ParseResult(scheme='', ...) and "anthropic://x" into scheme='anthropic'.
-        parsed = urlparse(path)
-        return parsed.scheme in ("", "file")
-
-    def resolve(self, path: str, client) -> dict:
-        directory = Path(path).expanduser().resolve()
-        if not directory.is_dir():
-            raise typer.BadParameter(
-                f"Path '{path}' is not a directory. Phase 1 only supports "
-                f"filesystem runbook paths; URI schemes (anthropic://, "
-                f"openai://, vertex://, azure:/) land in Phase 2+."
-            )
-        runbook_md = directory / "runbook.md"
-        if not runbook_md.exists():
-            raise typer.BadParameter(
-                f"Path '{directory}' is missing runbook.md. A runbook "
-                f"directory must contain runbook.md and a templates/ subdir."
-            )
-        templates_dir = directory / "templates"
-        if not templates_dir.is_dir():
-            raise typer.BadParameter(
-                f"Path '{directory}' is missing templates/. Cannot deploy."
-            )
-
-        slug = _read_slug_from_runbook_md(runbook_md, fallback=directory.name)
-        version = _read_version_from_runbook_md(runbook_md, fallback="0.1.0")
-        workflow_class = _camel_case_workflow(slug)
-        files = _gather_runbook_files(directory)
-        if not files:
-            raise typer.BadParameter(
-                f"No deployable files in templates/, subledgers/, or migrations/ "
-                f"under {directory}."
-            )
-
-        return {
-            "kind": "runbook",
-            "name": slug,
-            "packageName": slug,
-            "sourceRunbookSlug": slug,
-            "_runbook_deploy": {
-                "slug": slug,
-                "version": version,
-                "workflow_class": workflow_class,
-                "files": files,
-            },
-        }
-
-
-_HANDLERS: list[_PathHandler] = [_RunbookFilesystemHandler()]
-
-
-def _resolve_path(path: str, client) -> dict:
-    for h in _HANDLERS:
-        if h.matches(path):
-            return h.resolve(path, client)
-    raise typer.BadParameter(
-        f"No handler registered for path '{path}'. Phase 1 supports "
-        f"filesystem runbook paths only."
-    )
+    return {
+        "slug": slug,
+        "version": version,
+        "workflow_class": workflow_class,
+        "files": files,
+    }
 
 
 # ── ntro workflow create ──────────────────────────────────────────────
@@ -131,23 +83,22 @@ def create(
         ...,
         "--path",
         help=(
-            "Path or URI for the agent. Filesystem path (./runbooks/foo/) for "
-            "a runbook; future schemes (anthropic://, openai://, vertex://, "
-            "azure:/) for external agents."
+            "Filesystem path to a runbook directory (./runbooks/<slug>/). "
+            "External agents are registered via `ntro agent create` (Phase 2)."
         ),
     ),
     tenant: str = typer.Option(
         ...,
         "--tenant",
-        help="Tenant the agent belongs to (id or slug). Required.",
+        help="Tenant the runbook deploys to (id or slug). Required.",
         envvar="NTRO_TENANT",
     ),
     entity: Optional[str] = typer.Option(
         None,
         "--entity",
         help=(
-            "Entity to bind a workflow to. When provided, creates a workflow "
-            "row in addition to the agent. Required for --schedule."
+            "Entity to bind the workflow to. Required to create a workflow "
+            "row; without --entity, only the runbook gets deployed to the worker."
         ),
         envvar="NTRO_ENTITY",
     ),
@@ -165,8 +116,8 @@ def create(
         None,
         "--name",
         help=(
-            "Optional workflow display name (defaults to agent.name on read). "
-            "Used for the (orgId, name) uniqueness constraint when present."
+            "Optional workflow display name. Used for the (orgId, name) "
+            "uniqueness constraint when present."
         ),
     ),
     description: Optional[str] = typer.Option(None, "--description"),
@@ -174,27 +125,23 @@ def create(
         False,
         "--pin",
         help=(
-            "Pin the workflow to the version pushed by THIS command. "
-            "Without --pin, agentVersionId stays null (workflow follows "
-            "the agent's latest version)."
+            "Pin the workflow to the runbook version deployed by THIS "
+            "command. Without --pin, runbookVersion stays null (workflow "
+            "follows whatever is currently deployed on the worker)."
         ),
     ),
 ) -> None:
-    """Create or update an agent, and optionally bind a workflow to an entity.
+    """Deploy a runbook + optionally create a workflow binding for an entity.
 
     Common flow:
 
-        # Register agent + create workflow + deploy code in one shot
+        # Deploy runbook + create workflow + schedule
         ntro workflow create --path ./runbooks/nav-monthly/ \\
             --tenant byng --entity 4-high-court-limited \\
             --schedule "0 8 5 * *"
 
-        # Update runbook code only (no scheduling args = no workflow)
+        # Update runbook code only (no --entity = no workflow row)
         ntro workflow create --path ./runbooks/nav-monthly/ --tenant byng
-
-        # Bind same agent to a second entity
-        ntro workflow create --path ./runbooks/nav-monthly/ \\
-            --tenant byng --entity another-entity-slug
     """
     if schedule and not entity:
         raise typer.BadParameter("--schedule requires --entity")
@@ -203,46 +150,31 @@ def create(
 
     try:
         client = get_client()
-        resolved = _resolve_path(path, client)
+        runbook_deploy = _resolve_runbook_path(path)
 
-        # 1. Resolve tenant id (accept slug or id).
         tenant_id = _resolve_tenant_id(client, tenant)
 
-        # 2. Upsert the agent. Server enforces (tenantId, name) uniqueness;
-        #    on conflict we fetch the existing row.
-        agent_kwargs = {k: v for k, v in resolved.items() if not k.startswith("_")}
-        agent = _upsert_agent(client, tenant_id=tenant_id, **agent_kwargs)
-        out.print_kv("Agent", f"{agent.name} ({agent.id})")
+        # 1. Deploy runbook code to the worker.
+        client.runbooks.deploy_sync(
+            runbook_deploy["slug"],
+            tenant_slug=tenant,
+            version=runbook_deploy["version"],
+            workflow_class=runbook_deploy["workflow_class"],
+            activity_modules=["activities"],
+            files=runbook_deploy["files"],
+        )
+        out.print_kv(
+            "Worker deploy",
+            f"{runbook_deploy['slug']}@{runbook_deploy['version']}",
+        )
 
-        # 3. Push a new agent_version (kind=runbook only). External-agent
-        #    pushes are no-op at this layer; their state lives on the agent
-        #    row directly.
-        agent_version = None
-        runbook_deploy = resolved.get("_runbook_deploy")
-        if agent.kind == "runbook":
-            agent_version = client.agents.create_version_sync(agent.id)
-            out.print_kv("Agent version", f"v{agent_version.version} ({agent_version.id})")
-
-            # 4. Trigger worker deploy — uploads templates to ntro-worker via
-            #    NtroOpsDeployWorkflow. Same mechanism that powered the old
-            #    `ntro workflow deploy --runbook` command.
-            deploy_result = client.runbooks.deploy_sync(
-                runbook_deploy["slug"],
-                tenant_slug=tenant,
-                version=runbook_deploy["version"],
-                workflow_class=runbook_deploy["workflow_class"],
-                activity_modules=["activities"],
-                files=runbook_deploy["files"],
-            )
-            out.print_kv("Worker deploy", f"{runbook_deploy['slug']}@{runbook_deploy['version']}")
-
-        # 5. If --entity provided, also create the workflow row.
+        # 2. If --entity provided, also create the workflow row.
         if entity:
             entity_id = _resolve_entity_id(client, tenant_id, entity)
             workflow = client.workflows.create_sync(
-                agentId=agent.id,
+                runbookSlug=runbook_deploy["slug"],
+                runbookVersion=runbook_deploy["version"] if pin_version else None,
                 entityId=entity_id,
-                agentVersionId=agent_version.id if (pin_version and agent_version) else None,
                 name=name,
                 description=description,
                 schedule=schedule,
@@ -250,10 +182,7 @@ def create(
             )
             out.output(workflow, title=f"Workflow created: {workflow.id}")
         else:
-            out.print_kv(
-                "Workflow",
-                "(skipped — no --entity; agent only)",
-            )
+            out.print_kv("Workflow", "(skipped — no --entity)")
 
     except NtroError as e:
         out.print_error(str(e))
@@ -265,13 +194,13 @@ def create(
 
 @app.command("list")
 def list_workflows() -> None:
-    """List all workflows (binding rows: agent → entity)."""
+    """List all workflows (entity → runbook bindings)."""
     try:
         client = get_client()
         workflows = client.workflows.list_sync()
         out.output(
             workflows,
-            columns=["id", "name", "agentId", "entityId", "schedule"],
+            columns=["id", "name", "runbookSlug", "entityId", "schedule"],
             title="Workflows",
         )
     except NtroError as e:
@@ -281,11 +210,11 @@ def list_workflows() -> None:
 
 @app.command()
 def info(id: str = typer.Argument(help="Workflow ID")) -> None:
-    """Show workflow details (with agent + entity joins)."""
+    """Show workflow details (with entity join)."""
     try:
         client = get_client()
         wf = client.workflows.get_sync(id)
-        title = wf.name or (wf.agent.name if wf.agent else wf.id)
+        title = wf.name or wf.runbookSlug
         out.output(wf, title=f"Workflow: {title}")
     except NtroError as e:
         out.print_error(str(e))
@@ -386,22 +315,6 @@ def _resolve_entity_id(client, tenant_id: str, ref: str) -> str:
     raise typer.BadParameter(
         f"No entity matches '{ref}' on tenant '{tenant_id}'. Available: {available}"
     )
-
-
-def _upsert_agent(client, *, tenant_id: str, name: str, **kwargs):
-    """Create the agent, or fetch the existing one on (tenantId, name) conflict."""
-    try:
-        return client.agents.create_sync(tenantId=tenant_id, name=name, **kwargs)
-    except NtroError as e:
-        # Server returns 409 with the existing agent id when the unique
-        # constraint trips — pull the existing row for re-use.
-        message = str(e)
-        if "already exists" not in message and "409" not in message:
-            raise
-        for a in client.agents.list_sync(tenant_id=tenant_id):
-            if a.name == name:
-                return a
-        raise
 
 
 def _camel_case_workflow(slug: str) -> str:

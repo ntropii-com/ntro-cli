@@ -1,7 +1,13 @@
-"""ntro agent — power-user agent management.
+"""ntro agent — manage external Group B agents (Claude MAs etc).
 
-Most users won't need this — `ntro workflow create --path` upserts the agent
-implicitly. These subcommands are for inspection and deletion.
+N-80: agents register external capabilities only (Claude MA, OpenAI
+Assistant, Vertex Agent, Azure AI Agent). Runbooks are NOT agents —
+``ntro workflow create`` deploys runbooks directly without going
+through the agent registry.
+
+Phase 2 (N-76) wires the registration ergonomics for `--path
+anthropic://agents/<id>` etc; until then these subcommands cover
+inspection + deletion of any agents created via the API directly.
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ def list_agents(
         agents = client.agents.list_sync(tenant_id=tenant_id)
         out.output(
             agents,
-            columns=["id", "tenantId", "name", "kind", "packageName", "externalRef"],
+            columns=["id", "tenantId", "name", "kind", "externalRef"],
             title="Agents",
         )
     except NtroError as e:
@@ -45,7 +51,7 @@ def list_agents(
 
 @app.command()
 def info(id: str = typer.Argument(help="Agent ID")) -> None:
-    """Show agent details (with versions for kind=runbook)."""
+    """Show agent details (with capability_manifest version snapshots)."""
     try:
         client = get_client()
         agent = client.agents.get_sync(id)
@@ -60,7 +66,7 @@ def delete(
     id: str = typer.Argument(help="Agent ID"),
     yes: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
 ) -> None:
-    """Delete an agent. Fails if any workflows reference it."""
+    """Delete an external agent registration."""
     try:
         client = get_client()
         if not yes:
